@@ -67,7 +67,7 @@ def create_app(database_url=None, bot_token=None, bot_username=None, secure_cook
 
     def lobby_response(game, lobby_id, user_id):
         result = game.view(lobby_id, user_id)
-        if result["canCancel"]:
+        if result["canInvite"]:
             code = auth.invite_code(str(lobby_id))
             result["inviteUrl"] = f"https://t.me/{bot_username}?startapp={code}"
         return result
@@ -144,6 +144,13 @@ def create_app(database_url=None, bot_token=None, bot_username=None, secure_cook
         game.cancel(lobby_id, user_id)
         result = lobby_response(game, lobby_id, user_id)
         game.db.commit()
+        return result
+
+    @app.get("/api/series/{series_id}")
+    def series(series_id: UUID, user_id: int = Depends(user), game: Game = Depends(game)):
+        result = game.series.find_for_player(series_id, user_id)
+        if result is None:
+            raise GameError(404, "Серия не найдена")
         return result
 
     frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist"

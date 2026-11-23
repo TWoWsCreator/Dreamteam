@@ -104,12 +104,48 @@ def test_concurrent_join_never_adds_a_third_participant(player):
     assert len(host.get(f"/api/lobbies/{lobby_id}").json()["participants"]) == 2
 
 
-def test_concurrent_readiness_saves_both_decisions(player):
+def test_concurrent_readiness_creates_one_private_series(player, database):
+    host, guest, outsider = player(1, "Host"), player(2, "Guest"), player(3, "Outsider")
+    lobby_id, code = new_lobby(host)
+    endpoint = f"/api/lobbies/{lobby_id}"
+    assert host.put(endpoint + "/ready", json={"ready": True}).json()["series"] is None
+    assert host.put(endpoint + "/ready", json={"ready": False}).json()["series"] is None
+    assert enter(guest, code).status_code == 200
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(lambda client: client.put(endpoint + "/ready", json={"ready": True}), [host, guest]))
+    assert [r.status_code for r in responses] == [200, 200]
+    assert sum(r.json()["series"] is not None for r in responses) == 1
+
+    series = host.get(endpoint).json()["series"]
+    assert series["phase"] == "awaiting_veto"
+    assert guest.put(endpoint + "/ready", json={"ready": True}).json()["series"] == series
+    assert host.put(endpoint + "/ready", json={"ready": False}).status_code == 409
+    series_endpoint = f"/api/series/{series['id']}"
+    assert outsider.get(series_endpoint).status_code == 404
+
+    with psycopg.connect(database) as db:
+        assert db.execute("SELECT count(*) FROM series WHERE lobby_id = %s", (lobby_id,)).fetchone()[0] == 1
+        db.execute("UPDATE lobbies SET expires_at = clock_timestamp() WHERE id = %s", (lobby_id,))
+
+    returning = player(2, "Guest")
+    assert returning.get("/api/me").json()["activeLobby"] == lobby_id
+    assert returning.get(series_endpoint).json() == series
+    assert enter(returning, code).json()["series"] == series
+    assert outsider.post("/api/lobbies").status_code == 200
+    assert host.get(endpoint).json()["series"] == series
+
+    assert host.delete(endpoint).json()["series"]["phase"] == "cancelled"
+    assert guest.get(series_endpoint).json()["phase"] == "cancelled"
+    assert guest.put(endpoint + "/ready", json={"ready": True}).status_code == 410
+
+
+def test_cancelled_lobby_cannot_start_series(player, database):
     host, guest = player(1, "Host"), player(2, "Guest")
     lobby_id, code = new_lobby(host)
-    assert enter(guest, code).status_code == 200
     endpoint = f"/api/lobbies/{lobby_id}"
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda client: client.put(endpoint + "/ready", json={"ready": True}), [host, guest]))
-    assert [r.status_code for r in results] == [200, 200]
-    assert host.get(endpoint).json()["status"] == "ready"
+    assert enter(guest, code).status_code == 200
+    assert host.put(endpoint + "/ready", json={"ready": True}).status_code == 200
+    assert host.delete(endpoint).json()["status"] == "cancelled"
+    assert guest.put(endpoint + "/ready", json={"ready": True}).status_code == 410
+    with psycopg.connect(database) as db:
+        assert db.execute("SELECT count(*) FROM series WHERE lobby_id = %s", (lobby_id,)).fetchone()[0] == 0

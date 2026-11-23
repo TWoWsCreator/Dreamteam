@@ -3,6 +3,8 @@ from typing import Literal
 
 from psycopg.errors import UniqueViolation
 
+from .series import SeriesRepository
+
 Map = Literal["ancient", "anubis", "dust2", "inferno", "mirage", "nuke", "train"]
 Side = Literal["T", "CT"]
 Preset = Literal["balanced", "fast", "hold"]
@@ -25,6 +27,7 @@ class GameError(Exception):
 class Game:
     def __init__(self, connection):
         self.db = connection
+        self.series = SeriesRepository(connection)
 
     def login(self, user):
         self.db.execute(
@@ -39,7 +42,8 @@ class Game:
         ).fetchone()
         active = self.db.execute(
             """SELECT l.id FROM lobby_members m JOIN lobbies l ON l.id = m.lobby_id
-               WHERE m.telegram_id = %s AND m.active AND l.expires_at > clock_timestamp()""",
+               WHERE m.telegram_id = %s AND m.active
+                 AND (l.status = 'started' OR l.expires_at > clock_timestamp())""",
             (user_id,),
         ).fetchone()
         return {
@@ -96,10 +100,13 @@ class Game:
         self.expire_lobbies()
         self.db.execute("SELECT telegram_id FROM accounts WHERE telegram_id = %s FOR NO KEY UPDATE", (user_id,))
         lobby = self.lock_lobby(lobby_id)
+        is_guest = lobby["host_id"] != user_id and self.is_member(lobby_id, user_id)
+        if is_guest and lobby["status"] == "started":
+            return
         self.require_open(lobby)
         if lobby["host_id"] == user_id:
             raise GameError(409, "Это твоё приглашение")
-        if self.is_member(lobby_id, user_id):
+        if is_guest:
             return
         if len(self.members(lobby_id)) == 2:
             raise GameError(409, "В лобби уже два участника")
@@ -121,10 +128,10 @@ class Game:
         return lobby
 
     def require_open(self, lobby):
-        if not lobby["valid"] or lobby["status"] == "expired":
-            raise GameError(410, "Срок приглашения истёк")
         if lobby["status"] == "cancelled":
             raise GameError(410, "Лобби закрыто")
+        if not lobby["valid"] or lobby["status"] == "expired":
+            raise GameError(410, "Срок приглашения истёк")
 
     def is_member(self, lobby_id, user_id):
         return self.db.execute(
@@ -145,12 +152,15 @@ class Game:
     def view(self, lobby_id, user_id):
         self.require_member(lobby_id, user_id)
         lobby = self.lock_lobby(lobby_id)
-        status = lobby["status"]
-        if status in ("waiting", "ready") and not lobby["valid"]:
+        series = self.series.find_by_lobby(lobby_id)
+        status = "ready" if lobby["status"] == "started" else lobby["status"]
+        if lobby["status"] in ("waiting", "ready") and not lobby["valid"]:
             status = "expired"
         return {
             "id": lobby_id,
             "status": status,
+            "series": series,
+            "canInvite": lobby["host_id"] == user_id and status == "waiting",
             "canCancel": lobby["host_id"] == user_id and status in ("waiting", "ready"),
             "participants": [
                 {"name": m["display_name"], "ready": m["ready"], "you": m["telegram_id"] == user_id}
@@ -161,13 +171,19 @@ class Game:
     def ready(self, lobby_id, user_id, value):
         self.require_member(lobby_id, user_id)
         lobby = self.lock_lobby(lobby_id)
+        if lobby["status"] == "started":
+            if not value:
+                raise GameError(409, "Серия уже создана")
+            return
         self.require_open(lobby)
         self.db.execute(
             "UPDATE lobby_members SET ready = %s WHERE lobby_id = %s AND telegram_id = %s",
             (value, lobby_id, user_id),
         )
         members = self.members(lobby_id)
-        status = "ready" if len(members) == 2 and all(m["ready"] for m in members) else "waiting"
+        status = "started" if len(members) == 2 and all(m["ready"] for m in members) else "waiting"
+        if status == "started":
+            self.series.start(lobby_id)
         self.db.execute("UPDATE lobbies SET status = %s WHERE id = %s", (status, lobby_id))
 
     def cancel(self, lobby_id, user_id):
@@ -176,6 +192,9 @@ class Game:
         if lobby["host_id"] != user_id:
             raise GameError(403, "Закрыть лобби может только организатор")
         if lobby["status"] != "cancelled":
-            self.require_open(lobby)
+            if lobby["status"] == "started":
+                self.series.cancel_pending(lobby_id)
+            else:
+                self.require_open(lobby)
             self.db.execute("UPDATE lobbies SET status = 'cancelled' WHERE id = %s", (lobby_id,))
             self.db.execute("UPDATE lobby_members SET active = FALSE WHERE lobby_id = %s", (lobby_id,))
