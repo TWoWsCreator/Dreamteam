@@ -92,12 +92,15 @@ export function Lobby({ lobbyId, lobby, setLobby, enter, leave }) {
     </section>
   }
 
+  const seriesCreated = lobby.series?.phase === 'awaiting_veto'
+  const closeLabel = seriesCreated ? 'Закрыть серию' : 'Закрыть лобби'
+  const keepLabel = seriesCreated ? 'Оставить серию' : 'Оставить лобби'
   const you = lobby.participants.find((participant) => participant.you)
   const participants = [...lobby.participants].sort((first, second) => Number(second.you) - Number(first.you))
 
   return <section className="view">
-    <h1>Лобби друга</h1>
-    <p className="lead" role="status">{lobbyStatus[lobby.status]}</p>
+    <h1>{seriesCreated ? 'Серия с другом' : 'Лобби друга'}</h1>
+    <p className="lead" role="status">{seriesCreated ? 'Серия создана' : lobbyStatus[lobby.status]}</p>
     <div className="panel">
       <ul className="participants">
         {participants.map((participant) => <li key={participant.you ? 'you' : 'friend'}>
@@ -106,6 +109,7 @@ export function Lobby({ lobbyId, lobby, setLobby, enter, leave }) {
         </li>)}
         {participants.length < 2 && <li><span className="muted">Место для друга</span></li>}
       </ul>
+      {seriesCreated && <p className="muted">Оба игрока готовы. Следующий этап — вето карт.</p>}
       {closed ? <button type="button" className="primary" onClick={leave}>К игре с другом</button> : <>
         {lobby.inviteUrl && <div className="invite">
           <label className="field">
@@ -114,20 +118,20 @@ export function Lobby({ lobbyId, lobby, setLobby, enter, leave }) {
           </label>
           <button type="button" onClick={copyInvite}>Копировать</button>
         </div>}
-        {copyNote && <p role="status">{copyNote}</p>}
+        {lobby.inviteUrl && copyNote && <p role="status">{copyNote}</p>}
         <div className="actions">
-          {you && <button type="button" className="primary" disabled={pending}
+          {!seriesCreated && you && <button type="button" className="primary" disabled={pending}
             onClick={() => update(`/lobbies/${lobbyId}/ready`, 'PUT', { ready: !you.ready })}>
             {you.ready ? 'Снять готовность' : 'Я готов'}
           </button>}
           {lobby.canCancel && !confirmClose && <button type="button" disabled={pending}
-            onClick={() => setConfirmClose(true)}>Закрыть лобби</button>}
+            onClick={() => setConfirmClose(true)}>{closeLabel}</button>}
         </div>
         {confirmClose && <div className="confirmation">
-          <p>После закрытия приглашение перестанет действовать.</p>
+          <p>{seriesCreated ? 'После закрытия серия завершится до вето.' : 'После закрытия приглашение перестанет действовать.'}</p>
           <div className="actions">
             <button type="button" disabled={pending} onClick={() => update(`/lobbies/${lobbyId}`, 'DELETE')}>Подтвердить закрытие</button>
-            <button type="button" disabled={pending} onClick={() => setConfirmClose(false)}>Оставить лобби</button>
+            <button type="button" disabled={pending} onClick={() => setConfirmClose(false)}>{keepLabel}</button>
           </div>
         </div>}
       </>}

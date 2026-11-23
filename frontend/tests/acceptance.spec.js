@@ -47,7 +47,7 @@ test('недействительное приглашение оставляет
   await expect(page.getByRole('button', { name: 'Создать лобби' })).toBeVisible()
 })
 
-test('два игрока входят, сохраняют тактику, возвращаются в лобби и подтверждают готовность', async ({ page, browser }, info) => {
+test('два игрока создают серию из лобби и возвращаются к ней после обновления', async ({ page, browser }, info) => {
   test.skip(!botToken, 'Для сквозной проверки запусти API и укажи DREAMTEAM_E2E_BOT_TOKEN')
   const guest = await browser.newPage({ viewport: page.viewportSize() })
   const hostId = randomInt(1_000_000, 1_000_000_000)
@@ -81,18 +81,30 @@ test('два игрока входят, сохраняют тактику, во�
     await page.getByRole('button', { name: 'Я готов' }).click()
     await expect(page.getByRole('status')).toHaveText('Ожидание игроков')
     await guest.getByRole('button', { name: 'Я готов' }).click()
-    await expect(page.getByRole('status')).toHaveText('Оба игрока готовы')
+    await expect(page.getByRole('heading', { name: 'Серия с другом' })).toBeVisible()
+    await expect(guest.getByRole('heading', { name: 'Серия с другом' })).toBeVisible()
+    await expect(page.getByRole('status')).toHaveText('Серия создана')
+    await expect(page.getByRole('button', { name: 'Снять готовность' })).toHaveCount(0)
+
+    const lobbyRequest = '**/api/lobbies/*'
+    await page.route(lobbyRequest, (route) => route.abort())
+    await expect(page.getByRole('alert')).toHaveText('Нет связи с сервером. Попробуй ещё раз.')
+    await expect(page.getByRole('status')).toHaveText('Серия создана')
+    await page.unroute(lobbyRequest)
+    await expect(page.getByRole('alert')).toHaveCount(0)
 
     await navigation.getByRole('button', { name: 'Тактики' }).click()
     await expect(page.getByLabel('Быстрый темп')).toBeChecked()
     await navigation.getByRole('button', { name: 'Играть' }).click()
     await page.reload()
-    await expect(page.getByRole('status')).toHaveText('Оба игрока готовы')
+    await expect(page.getByRole('status')).toHaveText('Серия создана')
+    await guest.reload()
+    await expect(guest.getByRole('status')).toHaveText('Серия создана')
     if (process.env.DREAMTEAM_PREVIEW_DIR) {
       await page.screenshot({ path: `${process.env.DREAMTEAM_PREVIEW_DIR}/lobby-${info.project.name}.png`, fullPage: true })
     }
 
-    await page.getByRole('button', { name: 'Закрыть лобби' }).click()
+    await page.getByRole('button', { name: 'Закрыть серию' }).click()
     await page.getByRole('button', { name: 'Подтвердить закрытие' }).click()
     await expect(page.getByRole('status')).toHaveText('Лобби закрыто')
     await expect(guest.getByRole('status')).toHaveText('Лобби закрыто')
