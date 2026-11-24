@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from urllib.parse import parse_qs, urlparse
 
 import psycopg
@@ -149,3 +150,39 @@ def test_cancelled_lobby_cannot_start_series(player, database):
     assert guest.put(endpoint + "/ready", json={"ready": True}).status_code == 410
     with psycopg.connect(database) as db:
         assert db.execute("SELECT count(*) FROM series WHERE lobby_id = %s", (lobby_id,)).fetchone()[0] == 0
+
+
+def test_concurrent_cancellation_and_readiness_end_without_an_active_series(player, database):
+    host, guest = player(1, "Host"), player(2, "Guest")
+    lobby_id, code = new_lobby(host)
+    endpoint = f"/api/lobbies/{lobby_id}"
+    assert enter(guest, code).status_code == 200
+    assert host.put(endpoint + "/ready", json={"ready": True}).json()["series"] is None
+    start = Barrier(2, timeout=10)
+
+    def cancel():
+        start.wait()
+        return host.delete(endpoint)
+
+    def ready():
+        start.wait()
+        return guest.put(endpoint + "/ready", json={"ready": True})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        cancel_request = pool.submit(cancel)
+        ready_request = pool.submit(ready)
+        cancelled = cancel_request.result(timeout=15)
+        readied = ready_request.result(timeout=15)
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    assert readied.status_code in (200, 410)
+    assert guest.get(endpoint).json()["status"] == "cancelled"
+    assert host.get("/api/me").json()["activeLobby"] is None
+    assert guest.get("/api/me").json()["activeLobby"] is None
+    assert guest.put(endpoint + "/ready", json={"ready": True}).status_code == 410
+
+    with psycopg.connect(database) as db:
+        phases = db.execute("SELECT phase FROM series WHERE lobby_id = %s", (lobby_id,)).fetchall()
+        expected = [("cancelled",)] if readied.status_code == 200 else []
+        assert phases == expected
