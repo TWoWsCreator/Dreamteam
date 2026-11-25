@@ -27,13 +27,3 @@ export async function api(path, { method = 'GET', body, signal } = {}) {
   }
   return payload
 }
-
-export function getTelegramLaunch() {
-  const telegram = window.Telegram?.WebApp
-  telegram?.ready()
-  return {
-    initData: telegram?.initData || '',
-    invite: new URLSearchParams(telegram?.initData).get('start_param')
-      || new URLSearchParams(window.location.search).get('tgWebAppStartParam'),
-  }
-}

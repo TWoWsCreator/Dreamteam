@@ -47,7 +47,7 @@ test('недействительное приглашение оставляет
   await expect(page.getByRole('button', { name: 'Создать лобби' })).toBeVisible()
 })
 
-test('два игрока создают серию из лобби и возвращаются к ней после обновления', async ({ page, browser }, info) => {
+test('пять карточек из API и одинаковый итог Mirage у двух игроков после обновления', async ({ page, browser }, info) => {
   test.skip(!botToken, 'Для сквозной проверки запусти API и укажи DREAMTEAM_E2E_BOT_TOKEN')
   const guest = await browser.newPage({ viewport: page.viewportSize() })
   const hostId = randomInt(1_000_000, 1_000_000_000)
@@ -61,6 +61,8 @@ test('два игрока создают серию из лобби и возв�
 
     await page.getByRole('button', { name: 'Команда', exact: true }).click()
     await expect(page.locator('.player-card')).toHaveCount(5)
+    await expect(page.locator('.player-card')).toContainText(['IGL', 'AWP', 'Entry', 'Support', 'Lurker'])
+    await expect(page.getByText('Сила 50', { exact: true })).toHaveCount(5)
     const navigation = page.getByRole('navigation')
     await navigation.getByRole('button', { name: 'Тактики' }).click()
     await page.getByLabel('Быстрый темп').check()
@@ -80,34 +82,57 @@ test('два игрока создают серию из лобби и возв�
 
     await page.getByRole('button', { name: 'Я готов' }).click()
     await expect(page.getByRole('status')).toHaveText('Ожидание игроков')
-    await guest.getByRole('button', { name: 'Я готов' }).click()
-    await expect(page.getByRole('heading', { name: 'Серия с другом' })).toBeVisible()
-    await expect(guest.getByRole('heading', { name: 'Серия с другом' })).toBeVisible()
-    await expect(page.getByRole('status')).toHaveText('Серия создана')
-    await expect(page.getByRole('button', { name: 'Снять готовность' })).toHaveCount(0)
-
     const lobbyRequest = '**/api/lobbies/*'
     await page.route(lobbyRequest, (route) => route.abort())
     await expect(page.getByRole('alert')).toHaveText('Нет связи с сервером. Попробуй ещё раз.')
-    await expect(page.getByRole('status')).toHaveText('Серия создана')
+    await expect(page.getByRole('status')).toHaveText('Ожидание игроков')
     await page.unroute(lobbyRequest)
     await expect(page.getByRole('alert')).toHaveCount(0)
 
-    await navigation.getByRole('button', { name: 'Тактики' }).click()
-    await expect(page.getByLabel('Быстрый темп')).toBeChecked()
-    await navigation.getByRole('button', { name: 'Играть' }).click()
+    await expect(page.locator('.preparation')).toContainText('Mirage')
+    await expect(page.locator('.preparation')).toContainText('Быстрый темп')
+    await guest.getByRole('button', { name: 'Я готов' }).click()
+    await expect(page.getByRole('heading', { name: 'Итог карты' })).toBeVisible()
+    await expect(guest.getByRole('heading', { name: 'Итог карты' })).toBeVisible()
+    const score = await page.locator('.scoreboard dd').allTextContents()
+    await expect(guest.locator('.scoreboard dd')).toHaveText(score)
+    await page.getByText('Раунды', { exact: true }).click()
+    expect(await page.locator('.round-log li').count()).toBeGreaterThanOrEqual(13)
+
     await page.reload()
-    await expect(page.getByRole('status')).toHaveText('Серия создана')
+    await expect(page.locator('.scoreboard dd')).toHaveText(score)
     await guest.reload()
-    await expect(guest.getByRole('status')).toHaveText('Серия создана')
+    await expect(guest.locator('.scoreboard dd')).toHaveText(score)
     if (process.env.DREAMTEAM_PREVIEW_DIR) {
-      await page.screenshot({ path: `${process.env.DREAMTEAM_PREVIEW_DIR}/lobby-${info.project.name}.png`, fullPage: true })
+      await page.screenshot({ path: `${process.env.DREAMTEAM_PREVIEW_DIR}/result-${info.project.name}.png`, fullPage: true })
     }
 
-    await page.getByRole('button', { name: 'Закрыть серию' }).click()
-    await page.getByRole('button', { name: 'Подтвердить закрытие' }).click()
+    await page.getByRole('button', { name: 'На главную' }).click()
+    await page.getByRole('button', { name: 'Последний итог' }).click()
+    await expect(page.locator('.scoreboard dd')).toHaveText(score)
+  } finally {
+    await guest.close()
+  }
+})
+
+
+test('гость закрывает лобби и возвращается на главную', async ({ page, browser }, info) => {
+  test.skip(!botToken, 'Для сквозной проверки запусти API и укажи DREAMTEAM_E2E_BOT_TOKEN')
+  const guest = await browser.newPage({ viewport: page.viewportSize() })
+  const hostId = randomInt(1_000_000, 1_000_000_000)
+  try {
+    await prepareTelegram(page, initData({ id: hostId, first_name: 'Организатор' }))
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Играть с другом', exact: true }).click()
+    await page.getByRole('button', { name: 'Создать лобби' }).click()
+    const link = await page.getByLabel('Ссылка для друга').inputValue()
+    const invitation = new URL(link).searchParams.get('startapp')
+    await prepareTelegram(guest, initData({ id: hostId + 1_000_000_000, first_name: 'Гость' }, invitation))
+    await guest.goto(info.project.use.baseURL)
+    await guest.getByRole('button', { name: 'Закрыть лобби' }).click()
+    await guest.getByRole('button', { name: 'Подтвердить закрытие' }).click()
+    await expect(guest.getByRole('heading', { name: 'Играй с другом' })).toBeVisible()
     await expect(page.getByRole('status')).toHaveText('Лобби закрыто')
-    await expect(guest.getByRole('status')).toHaveText('Лобби закрыто')
   } finally {
     await guest.close()
   }

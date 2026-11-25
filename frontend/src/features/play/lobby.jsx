@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { api } from './api'
+import { api } from '../../shared/api'
+import { browserInviteBase, getInviteUrl } from '../../shared/telegram'
+import { presetName } from '../tactics/tactics'
+import { MatchResult } from './result'
 
 const lobbyStatus = {
   waiting: 'Ожидание игроков',
@@ -16,7 +19,8 @@ export function Lobby({ lobbyId, lobby, setLobby, enter, leave }) {
   const [confirmClose, setConfirmClose] = useState(false)
   const inviteField = useRef(null)
 
-  const closed = ['cancelled', 'expired'].includes(lobby?.status)
+  const closed = ['cancelled', 'expired', 'finished'].includes(lobby?.status)
+  const inviteUrl = getInviteUrl(lobby?.inviteUrl)
 
   useEffect(() => {
     if (!lobbyId || pending || closed) return undefined
@@ -53,9 +57,13 @@ export function Lobby({ lobbyId, lobby, setLobby, enter, leave }) {
     setError('')
     try {
       const next = await api(path, { method, body })
-      setLobby(next)
-      enter(next.id)
       setConfirmClose(false)
+      if (method === 'DELETE') {
+        leave()
+      } else {
+        setLobby(next)
+        enter(next.id)
+      }
     } catch (failure) {
       setError(failure.message)
     } finally {
@@ -65,7 +73,7 @@ export function Lobby({ lobbyId, lobby, setLobby, enter, leave }) {
 
   async function copyInvite() {
     try {
-      await navigator.clipboard.writeText(lobby.inviteUrl)
+      await navigator.clipboard.writeText(inviteUrl)
       setCopyNote('Ссылка скопирована')
     } catch {
       inviteField.current?.select()
@@ -76,7 +84,9 @@ export function Lobby({ lobbyId, lobby, setLobby, enter, leave }) {
   if (!lobbyId) {
     return <section className="view">
       <h1>Играть с другом</h1>
-      <p className="lead">Создай лобби для двоих и отправь другу ссылку в Telegram.</p>
+      <p className="lead">{browserInviteBase
+        ? 'Создай лобби и скопируй ссылку для второго игрока.'
+        : 'Создай лобби для двоих и отправь другу ссылку в Telegram.'}</p>
       <button type="button" className="primary" disabled={pending}
         onClick={() => update('/lobbies', 'POST')}>{pending ? 'Создаём…' : 'Создать лобби'}</button>
       {error && <p className="alert" role="alert">{error}</p>}
@@ -92,15 +102,17 @@ export function Lobby({ lobbyId, lobby, setLobby, enter, leave }) {
     </section>
   }
 
-  const seriesCreated = lobby.series?.phase === 'awaiting_veto'
-  const closeLabel = seriesCreated ? 'Закрыть серию' : 'Закрыть лобби'
-  const keepLabel = seriesCreated ? 'Оставить серию' : 'Оставить лобби'
+  if (lobby.status === 'finished' && lobby.series?.result) {
+    return <MatchResult result={lobby.series.result} participants={lobby.participants} leave={leave} />
+  }
+
+  const legacySeries = lobby.series?.phase === 'awaiting_veto'
   const you = lobby.participants.find((participant) => participant.you)
   const participants = [...lobby.participants].sort((first, second) => Number(second.you) - Number(first.you))
 
   return <section className="view">
-    <h1>{seriesCreated ? 'Серия с другом' : 'Лобби друга'}</h1>
-    <p className="lead" role="status">{seriesCreated ? 'Серия создана' : lobbyStatus[lobby.status]}</p>
+    <h1>Лобби друга</h1>
+    <p className="lead" role="status">{lobbyStatus[lobby.status]}</p>
     <div className="panel">
       <ul className="participants">
         {participants.map((participant) => <li key={participant.you ? 'you' : 'friend'}>
@@ -109,29 +121,33 @@ export function Lobby({ lobbyId, lobby, setLobby, enter, leave }) {
         </li>)}
         {participants.length < 2 && <li><span className="muted">Место для друга</span></li>}
       </ul>
-      {seriesCreated && <p className="muted">Оба игрока готовы. Следующий этап — вето карт.</p>}
+      {!closed && lobby.preparation && <dl className="preparation">
+        <div><dt>Карта</dt><dd>Mirage</dd></div>
+        <div><dt>Твоя сторона</dt><dd>{lobby.preparation.side}</dd></div>
+        <div><dt>Тактика</dt><dd>{presetName(lobby.preparation.preset)}</dd></div>
+      </dl>}
       {closed ? <button type="button" className="primary" onClick={leave}>К игре с другом</button> : <>
-        {lobby.inviteUrl && <div className="invite">
+        {inviteUrl && <div className="invite">
           <label className="field">
             Ссылка для друга
-            <input ref={inviteField} readOnly value={lobby.inviteUrl} />
+            <input ref={inviteField} readOnly value={inviteUrl} />
           </label>
           <button type="button" onClick={copyInvite}>Копировать</button>
         </div>}
-        {lobby.inviteUrl && copyNote && <p role="status">{copyNote}</p>}
+        {inviteUrl && copyNote && <p role="status">{copyNote}</p>}
         <div className="actions">
-          {!seriesCreated && you && <button type="button" className="primary" disabled={pending}
-            onClick={() => update(`/lobbies/${lobbyId}/ready`, 'PUT', { ready: !you.ready })}>
-            {you.ready ? 'Снять готовность' : 'Я готов'}
+          {you && <button type="button" className="primary" disabled={pending}
+            onClick={() => update(`/lobbies/${lobbyId}/ready`, 'PUT', { ready: legacySeries || !you.ready })}>
+            {legacySeries ? 'Продолжить' : you.ready ? 'Снять готовность' : 'Я готов'}
           </button>}
           {lobby.canCancel && !confirmClose && <button type="button" disabled={pending}
-            onClick={() => setConfirmClose(true)}>{closeLabel}</button>}
+            onClick={() => setConfirmClose(true)}>Закрыть лобби</button>}
         </div>
         {confirmClose && <div className="confirmation">
-          <p>{seriesCreated ? 'После закрытия серия завершится до вето.' : 'После закрытия приглашение перестанет действовать.'}</p>
+          <p>Лобби закроется для обоих игроков.</p>
           <div className="actions">
             <button type="button" disabled={pending} onClick={() => update(`/lobbies/${lobbyId}`, 'DELETE')}>Подтвердить закрытие</button>
-            <button type="button" disabled={pending} onClick={() => setConfirmClose(false)}>{keepLabel}</button>
+            <button type="button" disabled={pending} onClick={() => setConfirmClose(false)}>Оставить лобби</button>
           </div>
         </div>}
       </>}

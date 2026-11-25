@@ -140,3 +140,19 @@ input[type=radio] { accent-color: var(--accent); width: 1rem; height: 1rem; flex
   .invite { grid-template-columns: minmax(0, 1fr); }
   .invite button { justify-self: start; }
 }
+.player-power { display: block; margin-top: .65rem; color: var(--accent); }
+.last-result { margin-left: .5rem; }
+.preparation, .scoreboard {
+  display: grid;
+  gap: .6rem;
+  margin: 0 0 1rem;
+}
+.preparation { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); }
+.preparation dt, .scoreboard dt { color: var(--muted); }
+.preparation dd, .scoreboard dd { margin: .25rem 0 0; font-weight: 750; }
+.scoreboard { grid-template-columns: 1fr 1fr; text-align: center; }
+.scoreboard dd { font-size: 2.6rem; color: var(--accent); font-variant-numeric: tabular-nums; }
+.round-log { margin-bottom: 1rem; }
+.round-log summary { cursor: pointer; padding-block: .5rem; }
+.round-log li { margin-bottom: .5rem; }
+span:has(+ #demo-peer) { display: none; }

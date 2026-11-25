@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { api } from './api'
+import { api } from '../../shared/api'
 
 const maps = [
   ['ancient', 'Ancient'], ['anubis', 'Anubis'], ['dust2', 'Dust II'],
@@ -10,6 +10,10 @@ const presets = [
   ['fast', 'Быстрый темп', 'Команда действует активнее с начала раунда.'],
   ['hold', 'Выжидание', 'Команда удерживает позиции и ждёт действия соперника.'],
 ]
+
+export function presetName(value) {
+  return presets.find(([id]) => id === value)?.[1] ?? value
+}
 
 export function Tactics() {
   const [map, setMap] = useState('mirage')
