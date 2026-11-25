@@ -1,4 +1,8 @@
+from random import Random
+
 from ..domain.errors import GameError
+from ..domain.rules import DEFAULT_PRESET
+from ..domain.simulation import MIRAGE, simulate_mirage
 
 
 class Game:
@@ -22,11 +26,13 @@ class Game:
     def profile(self, user_id):
         player = self.players.account(user_id)
         active = self.players.active_lobby(user_id)
+        last_finished = self.series.last_finished_lobby(user_id)
         return {
             "displayName": player["display_name"],
             "team": self.players.team(user_id),
             "activeLobby": active["id"] if active else None,
             "activeSeries": bool(active and active["status"] == "started"),
+            "lastFinishedLobby": last_finished["lobby_id"] if last_finished else None,
         }
 
     def tactics(self, user_id):
@@ -64,6 +70,7 @@ class Game:
                     raise GameError("conflict", "В лобби уже два участника")
                 if not self.players.add_member(lobby_id, user_id):
                     raise GameError("conflict", "Ты уже в другом лобби")
+                self.players.record_guest_joined(lobby_id)
             return self.lobby(lobby_id, user_id)
 
     def lock_lobby(self, lobby_id):
@@ -75,7 +82,9 @@ class Game:
     def require_open(self, lobby):
         if lobby["status"] == "cancelled":
             raise GameError("gone", "Лобби закрыто")
-        if not lobby["valid"] or lobby["status"] == "expired":
+        if lobby["status"] == "finished":
+            raise GameError("gone", "Карта уже сыграна")
+        if lobby["status"] == "expired" or (not lobby["valid"] and not lobby["guest_joined"]):
             raise GameError("gone", "Срок приглашения истёк")
 
     def require_member(self, lobby_id, user_id):
@@ -88,16 +97,23 @@ class Game:
             lobby = self.lock_lobby(lobby_id)
             series = self.series.find_by_lobby(lobby_id)
             status = "ready" if lobby["status"] == "started" else lobby["status"]
-            if lobby["status"] in ("waiting", "ready") and not lobby["valid"]:
+            if status == "waiting" and not lobby["valid"] and not lobby["guest_joined"]:
                 status = "expired"
+            side = "T" if lobby["host_id"] == user_id else "CT"
             return {
                 "id": lobby_id,
                 "status": status,
                 "series": series,
-                "canInvite": lobby["host_id"] == user_id and status == "waiting",
-                "canCancel": lobby["host_id"] == user_id and status in ("waiting", "ready"),
+                "canInvite": lobby["host_id"] == user_id and status == "waiting" and lobby["valid"],
+                "canCancel": status in ("waiting", "ready"),
+                "preparation": {"map": MIRAGE, "side": side, "preset": self.mirage_tactics(user_id)[side]},
                 "participants": [
-                    {"name": m["display_name"], "ready": m["ready"], "you": m["telegram_id"] == user_id}
+                    {
+                        "name": m["display_name"],
+                        "ready": m["ready"],
+                        "you": m["telegram_id"] == user_id,
+                        "seat": "host" if m["telegram_id"] == lobby["host_id"] else "guest",
+                    }
                     for m in self.players.members(lobby_id)
                 ],
             }
@@ -108,34 +124,46 @@ class Game:
             raise GameError("not_found", "Серия не найдена")
         return result
 
+    def mirage_tactics(self, user_id):
+        presets = {"T": DEFAULT_PRESET, "CT": DEFAULT_PRESET}
+        presets.update({
+            item["side"]: item["preset"] for item in self.players.list_tactics(user_id)
+            if item["map"] == MIRAGE
+        })
+        return presets
+
+    def finish_map(self, lobby_id, host_id, members):
+        guest_id = next(member["telegram_id"] for member in members if member["telegram_id"] != host_id)
+        result = simulate_mirage(self.mirage_tactics(host_id), self.mirage_tactics(guest_id), Random().random)
+        self.series.start(lobby_id)
+        self.series.finish(lobby_id, result)
+        self.players.set_lobby_status(lobby_id, "finished")
+        self.players.deactivate_members(lobby_id)
+
     def ready(self, lobby_id, user_id, value):
         with self.unit.transaction():
             self.require_member(lobby_id, user_id)
             lobby = self.lock_lobby(lobby_id)
-            if lobby["status"] == "started":
+            if lobby["status"] == "finished":
                 if not value:
-                    raise GameError("conflict", "Серия уже создана")
+                    raise GameError("conflict", "Карта уже сыграна")
                 return self.lobby(lobby_id, user_id)
             self.require_open(lobby)
             self.players.set_member_ready(lobby_id, user_id, value)
             members = self.players.members(lobby_id)
-            status = "started" if len(members) == 2 and all(m["ready"] for m in members) else "waiting"
-            if status == "started":
-                self.series.start(lobby_id)
-            self.players.set_lobby_status(lobby_id, status)
+            if len(members) == 2 and all(member["ready"] for member in members):
+                self.finish_map(lobby_id, lobby["host_id"], members)
             return self.lobby(lobby_id, user_id)
 
     def cancel(self, lobby_id, user_id):
         with self.unit.transaction():
             self.require_member(lobby_id, user_id)
             lobby = self.lock_lobby(lobby_id)
-            if lobby["host_id"] != user_id:
-                raise GameError("forbidden", "Закрыть лобби может только организатор")
+            if lobby["status"] == "finished":
+                raise GameError("conflict", "Карта уже сыграна")
             if lobby["status"] != "cancelled":
-                if lobby["status"] == "started":
-                    self.series.cancel_pending(lobby_id)
-                else:
-                    self.require_open(lobby)
+                self.require_open(lobby)
+                self.series.cancel_pending(lobby_id)
                 self.players.set_lobby_status(lobby_id, "cancelled")
                 self.players.deactivate_members(lobby_id)
             return self.lobby(lobby_id, user_id)

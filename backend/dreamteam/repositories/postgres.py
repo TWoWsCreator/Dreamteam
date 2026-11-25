@@ -58,7 +58,7 @@ class PostgresRepository:
         return self.db.execute(
             """SELECT l.id, l.host_id, l.status FROM lobby_members m JOIN lobbies l ON l.id = m.lobby_id
                WHERE m.telegram_id = %s AND m.active
-                 AND (l.status = 'started' OR l.expires_at > clock_timestamp())""",
+                 AND (l.guest_joined OR l.status = 'started' OR l.expires_at > clock_timestamp())""",
             (user_id,),
         ).fetchone()
 
@@ -66,7 +66,7 @@ class PostgresRepository:
         self.db.execute(
             """WITH expired AS (
                    UPDATE lobbies SET status = 'expired'
-                   WHERE expires_at <= clock_timestamp() AND status IN ('waiting', 'ready')
+                   WHERE expires_at <= clock_timestamp() AND status IN ('waiting', 'ready') AND NOT guest_joined
                    RETURNING id
                )
                UPDATE lobby_members SET active = FALSE
@@ -123,3 +123,6 @@ class PostgresRepository:
 
     def deactivate_members(self, lobby_id):
         self.db.execute("UPDATE lobby_members SET active = FALSE WHERE lobby_id = %s", (lobby_id,))
+
+    def record_guest_joined(self, lobby_id):
+        self.db.execute("UPDATE lobbies SET guest_joined = TRUE WHERE id = %s", (lobby_id,))

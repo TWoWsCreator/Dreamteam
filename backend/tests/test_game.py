@@ -87,17 +87,17 @@ def test_lobby_is_private_and_readiness_recovers_after_login(player):
     assert enter(guest, code).status_code == 200
     assert enter(guest, code).status_code == 200
     assert enter(stranger, code).status_code == 409
-    assert guest.delete(endpoint).status_code == 403
+    assert stranger.delete(endpoint).status_code == 404
 
     assert host.put(endpoint + "/ready", json={"ready": True}).json()["status"] == "waiting"
-    assert guest.put(endpoint + "/ready", json={"ready": True}).json()["status"] == "ready"
-    assert guest.put(endpoint + "/ready", json={"ready": True}).json()["status"] == "ready"
+    finished = guest.put(endpoint + "/ready", json={"ready": True}).json()
+    assert finished["status"] == "finished"
+    assert guest.put(endpoint + "/ready", json={"ready": True}).json() == finished
     returning = player(2, "Guest")
-    assert returning.get("/api/me").json()["activeLobby"] == lobby_id
-    assert returning.get(endpoint).json()["status"] == "ready"
-    assert "inviteUrl" not in returning.get(endpoint).json()
-
-    assert host.delete(endpoint).json()["status"] == "cancelled"
+    assert returning.get("/api/me").json()["lastFinishedLobby"] == lobby_id
+    assert returning.get(endpoint).json() == finished
+    assert "inviteUrl" not in finished
+    assert host.delete(endpoint).status_code == 409
     assert enter(guest, code).status_code == 410
     assert returning.get("/api/me").json()["activeLobby"] is None
 
@@ -134,7 +134,7 @@ def test_concurrent_readiness_creates_one_private_series(player, database):
     assert sum(r.json()["series"] is not None for r in responses) == 1
 
     series = host.get(endpoint).json()["series"]
-    assert series["phase"] == "awaiting_veto"
+    assert series["phase"] == "finished"
     assert guest.put(endpoint + "/ready", json={"ready": True}).json()["series"] == series
     assert host.put(endpoint + "/ready", json={"ready": False}).status_code == 409
     series_endpoint = f"/api/series/{series['id']}"
@@ -145,15 +145,14 @@ def test_concurrent_readiness_creates_one_private_series(player, database):
         db.execute("UPDATE lobbies SET expires_at = clock_timestamp() WHERE id = %s", (lobby_id,))
 
     returning = player(2, "Guest")
-    assert returning.get("/api/me").json()["activeLobby"] == lobby_id
+    assert returning.get("/api/me").json()["lastFinishedLobby"] == lobby_id
     assert returning.get(series_endpoint).json() == series
-    assert enter(returning, code).json()["series"] == series
+    assert enter(returning, code).status_code == 410
     assert outsider.post("/api/lobbies").status_code == 200
     assert host.get(endpoint).json()["series"] == series
-
-    assert host.delete(endpoint).json()["series"]["phase"] == "cancelled"
-    assert guest.get(series_endpoint).json()["phase"] == "cancelled"
-    assert guest.put(endpoint + "/ready", json={"ready": True}).status_code == 410
+    assert host.delete(endpoint).status_code == 409
+    assert guest.get(series_endpoint).json()["result"] == series["result"]
+    assert new_lobby(host)[0] != lobby_id
 
 
 def test_cancelled_lobby_cannot_start_series(player, database):
@@ -162,13 +161,13 @@ def test_cancelled_lobby_cannot_start_series(player, database):
     endpoint = f"/api/lobbies/{lobby_id}"
     assert enter(guest, code).status_code == 200
     assert host.put(endpoint + "/ready", json={"ready": True}).status_code == 200
-    assert host.delete(endpoint).json()["status"] == "cancelled"
+    assert guest.delete(endpoint).json()["status"] == "cancelled"
     assert guest.put(endpoint + "/ready", json={"ready": True}).status_code == 410
     with psycopg.connect(database) as db:
         assert db.execute("SELECT count(*) FROM series WHERE lobby_id = %s", (lobby_id,)).fetchone()[0] == 0
 
 
-def test_concurrent_cancellation_and_readiness_end_without_an_active_series(player, database):
+def test_concurrent_cancellation_and_readiness_have_one_final_result(player, database):
     host, guest = player(1, "Host"), player(2, "Guest")
     lobby_id, code = new_lobby(host)
     endpoint = f"/api/lobbies/{lobby_id}"
@@ -190,15 +189,36 @@ def test_concurrent_cancellation_and_readiness_end_without_an_active_series(play
         cancelled = cancel_request.result(timeout=15)
         readied = ready_request.result(timeout=15)
 
-    assert cancelled.status_code == 200
-    assert cancelled.json()["status"] == "cancelled"
-    assert readied.status_code in (200, 410)
-    assert guest.get(endpoint).json()["status"] == "cancelled"
+    pair = cancelled.status_code, readied.status_code
+    assert pair in ((200, 410), (409, 200))
+    final_status = "cancelled" if pair == (200, 410) else "finished"
+    assert guest.get(endpoint).json()["status"] == final_status
     assert host.get("/api/me").json()["activeLobby"] is None
     assert guest.get("/api/me").json()["activeLobby"] is None
-    assert guest.put(endpoint + "/ready", json={"ready": True}).status_code == 410
 
     with psycopg.connect(database) as db:
         phases = db.execute("SELECT phase FROM series WHERE lobby_id = %s", (lobby_id,)).fetchall()
-        expected = [("cancelled",)] if readied.status_code == 200 else []
-        assert phases == expected
+        assert phases == ([] if final_status == "cancelled" else [("finished",)])
+
+
+def test_joined_players_can_start_after_invitation_expires(player, database):
+    host, guest = player(1, "Host"), player(2, "Guest")
+    lobby_id, code = new_lobby(host)
+    endpoint = f"/api/lobbies/{lobby_id}"
+    assert enter(guest, code).status_code == 200
+    assert host.get(endpoint).json()["preparation"] == {"map": "mirage", "side": "T", "preset": "balanced"}
+    peer = {"map": "mirage", "side": "CT", "preset": "hold"}
+    assert guest.put("/api/tactics", json=peer).status_code == 200
+
+    with psycopg.connect(database) as db:
+        db.execute("UPDATE lobbies SET expires_at = clock_timestamp() WHERE id = %s", (lobby_id,))
+
+    assert guest.get("/api/me").json()["activeLobby"] == lobby_id
+    assert guest.get(endpoint).json()["preparation"] == peer
+    assert host.put(endpoint + "/ready", json={"ready": True}).status_code == 200
+    reply = guest.put(endpoint + "/ready", json={"ready": True}).json()
+    result = reply["series"]["result"]
+    assert result["rounds"][0]["guestPreset"] == "hold"
+    assert max(result["score"].values()) == 13
+    assert sum(result["score"].values()) == len(result["rounds"])
+    assert host.get(endpoint).json()["series"] == reply["series"]

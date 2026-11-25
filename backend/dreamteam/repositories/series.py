@@ -1,5 +1,7 @@
 from uuid import uuid4
 
+from psycopg.types.json import Jsonb
+
 
 class SeriesRepository:
     def __init__(self, connection):
@@ -7,13 +9,13 @@ class SeriesRepository:
 
     def find_by_lobby(self, lobby_id):
         return self.db.execute(
-            "SELECT id, phase FROM series WHERE lobby_id = %s",
+            "SELECT id, phase, result FROM series WHERE lobby_id = %s",
             (lobby_id,),
         ).fetchone()
 
     def find_for_player(self, series_id, user_id):
         return self.db.execute(
-            """SELECT s.id, s.phase FROM series s
+            """SELECT s.id, s.phase, s.result FROM series s
                JOIN lobby_members m ON m.lobby_id = s.lobby_id
                WHERE s.id = %s AND m.telegram_id = %s""",
             (series_id, user_id),
@@ -31,3 +33,18 @@ class SeriesRepository:
             "UPDATE series SET phase = 'cancelled' WHERE lobby_id = %s AND phase = 'awaiting_veto'",
             (lobby_id,),
         )
+
+    def finish(self, lobby_id, result):
+        self.db.execute(
+            """UPDATE series SET phase = 'finished', result = %s, finished_at = clock_timestamp()
+               WHERE lobby_id = %s AND phase = 'awaiting_veto'""",
+            (Jsonb(result), lobby_id),
+        )
+
+    def last_finished_lobby(self, user_id):
+        return self.db.execute(
+            """SELECT s.lobby_id FROM series s JOIN lobby_members m ON m.lobby_id = s.lobby_id
+               WHERE m.telegram_id = %s AND s.phase = 'finished'
+               ORDER BY s.finished_at DESC, s.id DESC LIMIT 1""",
+            (user_id,),
+        ).fetchone()
