@@ -42,7 +42,9 @@ def test_profile_and_tactics_survive_new_session(client_factory, player, databas
     first = player(100, "Sam")
     profile = first.get("/api/me").json()
     assert profile["displayName"] == "Sam"
-    assert {card["role"] for card in profile["team"]} == {"IGL", "AWP", "Entry", "Support", "Lurker"}
+    assert [(card["slot"], card["role"], card["power"]) for card in profile["team"]] == [
+        (1, "IGL", 50), (2, "AWP", 50), (3, "Entry", 50), (4, "Support", 50), (5, "Lurker", 50),
+    ]
     selections = [
         {"map": "mirage", "side": "T", "preset": "fast"},
         {"map": "mirage", "side": "CT", "preset": "hold"},
@@ -52,10 +54,24 @@ def test_profile_and_tactics_survive_new_session(client_factory, player, databas
     assert first.put("/api/tactics", json={**selections[0], "preset": "invalid"}).status_code == 422
 
     next_session = player(100, "Sam")
+    assert next_session.get("/api/me").json()["team"] == profile["team"]
     assert next_session.get("/api/tactics").json() == list(reversed(selections))
     assert player(200, "Guest").get("/api/tactics").json() == []
     with psycopg.connect(database) as db:
         assert db.execute("SELECT count(*) FROM accounts").fetchone()[0] == 2
+        assert db.execute("SELECT count(*) FROM team_players WHERE telegram_id = 100").fetchone()[0] == 5
+
+
+def test_concurrent_first_login_keeps_one_team(player, database):
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        clients = list(pool.map(lambda _: player(42, "Player"), range(2)))
+
+    teams = [client.get("/api/me").json()["team"] for client in clients]
+    assert teams[0] == teams[1]
+    assert len(teams[0]) == 5
+    with psycopg.connect(database) as db:
+        assert db.execute("SELECT count(*) FROM accounts WHERE telegram_id = 42").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM team_players WHERE telegram_id = 42").fetchone()[0] == 5
 
 
 def test_lobby_is_private_and_readiness_recovers_after_login(player):
